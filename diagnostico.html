@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Diagnóstico PWA — Reposiciones</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:#000; color:#fff; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; padding:24px 18px 60px; -webkit-font-smoothing:antialiased; }
+  h1 { font-size:19px; font-weight:600; letter-spacing:-0.01em; }
+  .sub { color:#8a8a8a; font-size:13px; margin-top:6px; margin-bottom:26px; line-height:1.5; }
+  .row { display:flex; gap:12px; align-items:flex-start; padding:13px 0; border-top:1px solid #1e1e1e; }
+  .dot { width:9px; height:9px; border-radius:50%; flex:0 0 auto; margin-top:5px; background:#4a4a4a; }
+  .ok { background:#3fbf6a; } .bad { background:#e0483c; } .warn { background:#c9a227; }
+  .lbl { font-size:14px; font-weight:500; }
+  .val { font-size:12.5px; color:#8a8a8a; margin-top:3px; line-height:1.45; word-break:break-all; }
+  .verdict { margin-top:26px; padding:16px; border:1px solid #2a2a2a; border-radius:10px; font-size:13.5px; line-height:1.6; }
+  .verdict b { color:#c9a227; }
+  button { margin-top:22px; width:100%; background:#c9a227; color:#000; border:0; border-radius:9px; padding:15px; font-size:15px; font-weight:600; font-family:inherit; }
+  button[disabled] { background:#2a2a2a; color:#666; }
+</style>
+</head>
+<body>
+<h1>Diagnóstico de instalación</h1>
+<p class="sub">Abre esta página en Chrome desde el móvil, en el mismo dominio donde está la app.</p>
+<div id="out"></div>
+<div class="verdict" id="verdict">Comprobando…</div>
+<button id="inst" disabled>Esperando invitación de instalación…</button>
+
+<script>
+var out = document.getElementById('out');
+var notes = [];
+function row(state, lbl, val){
+  var d = document.createElement('div');
+  d.className = 'row';
+  d.innerHTML = '<div class="dot ' + state + '"></div><div><div class="lbl">' + lbl + '</div><div class="val">' + val + '</div></div>';
+  out.appendChild(d);
+}
+
+(async function(){
+  // 1. Contexto seguro
+  var https = location.protocol === 'https:' || location.hostname === 'localhost';
+  row(https ? 'ok' : 'bad', 'Contexto seguro (HTTPS)', location.origin);
+  if(!https) notes.push('El sitio no está en HTTPS. Chrome nunca instalará una PWA así.');
+
+  // 2. Enlace al manifest en el DOM
+  var link = document.querySelector('link[rel="manifest"]');
+  row(link ? 'ok' : 'warn', 'Etiqueta &lt;link rel="manifest"&gt;', link ? link.href : 'no presente en esta página de diagnóstico (normal)');
+
+  // 3. Descarga y validación del manifest
+  var mf = null;
+  try {
+    var r = await fetch('manifest.json', {cache:'no-store'});
+    var ct = r.headers.get('content-type') || '(sin content-type)';
+    if(!r.ok) throw new Error('HTTP ' + r.status);
+    var txt = await r.text();
+    try { mf = JSON.parse(txt); }
+    catch(e){ throw new Error('no es JSON válido. El servidor devolvió: ' + txt.slice(0,60).replace(/</g,'&lt;') + '…'); }
+    row('ok', 'manifest.json accesible', 'HTTP 200 · ' + ct);
+    if(!/json|manifest/i.test(ct)) notes.push('El servidor sirve manifest.json con content-type «' + ct + '». Debería ser application/manifest+json o application/json.');
+  } catch(e){
+    row('bad', 'manifest.json', 'Error: ' + e.message);
+    notes.push('El manifest no se puede leer. Es la causa directa de que solo salga «Añadir a pantalla de inicio».');
+  }
+
+  // 4. Campos obligatorios
+  if(mf){
+    var falta = [];
+    ['name','icons','start_url'].forEach(function(k){ if(!mf[k]) falta.push(k); });
+    if(!mf.display || ['standalone','fullscreen','minimal-ui'].indexOf(mf.display) < 0) falta.push('display (standalone)');
+    var s192 = (mf.icons||[]).some(function(i){ return /(^|\s)192x192(\s|$)/.test(i.sizes||''); });
+    var s512 = (mf.icons||[]).some(function(i){ return /(^|\s)512x512(\s|$)/.test(i.sizes||''); });
+    if(!s192) falta.push('icono 192x192');
+    if(!s512) falta.push('icono 512x512');
+    row(falta.length ? 'bad' : 'ok', 'Campos obligatorios del manifest', falta.length ? 'Faltan: ' + falta.join(', ') : 'name, icons 192+512, start_url, display standalone');
+    if(falta.length) notes.push('Al manifest le faltan campos obligatorios: ' + falta.join(', ') + '.');
+    row('ok', 'start_url declarado', mf.start_url + '  ·  scope: ' + (mf.scope || '(no declarado)'));
+  }
+
+  // 5. Iconos realmente descargables
+  if(mf && mf.icons){
+    for(var i = 0; i < mf.icons.length; i++){
+      var ic = mf.icons[i];
+      try {
+        var ir = await fetch(ic.src, {cache:'no-store'});
+        var ictype = ir.headers.get('content-type') || '';
+        var okIcon = ir.ok && /image/i.test(ictype);
+        row(okIcon ? 'ok' : 'bad', 'Icono ' + ic.sizes + ' (' + (ic.purpose||'any') + ')', ic.src + ' · HTTP ' + ir.status + ' · ' + (ictype || 'sin tipo'));
+        if(!okIcon) notes.push('El icono ' + ic.src + ' no se descarga correctamente (HTTP ' + ir.status + ').');
+      } catch(e){
+        row('bad', 'Icono ' + ic.sizes, ic.src + ' — no accesible');
+        notes.push('El icono ' + ic.src + ' no existe en el servidor. Sube la carpeta icons/ completa.');
+      }
+    }
+  }
+
+  // 6. Service worker
+  if('serviceWorker' in navigator){
+    var regs = await navigator.serviceWorker.getRegistrations();
+    row(regs.length ? 'ok' : 'warn', 'Service worker registrado', regs.length ? regs.map(function(x){ return x.scope; }).join(', ') : 'ninguno todavía — abre index.html primero');
+    if(!regs.length) notes.push('Aún no hay service worker. Abre index.html, espera a que cargue del todo y vuelve aquí.');
+  } else {
+    row('bad', 'Service worker', 'no soportado por este navegador');
+  }
+
+  // 7. Modo actual
+  var standalone = matchMedia('(display-mode: standalone)').matches;
+  row(standalone ? 'ok' : 'warn', 'Modo de visualización actual', standalone ? 'standalone (ya instalada)' : 'browser (en pestaña de Chrome)');
+
+  render();
+})();
+
+var prompt = null;
+window.addEventListener('beforeinstallprompt', function(e){
+  e.preventDefault();
+  prompt = e;
+  var b = document.getElementById('inst');
+  b.disabled = false;
+  b.textContent = 'Instalar Reposiciones';
+  row('ok', 'Chrome ofrece instalación real', 'evento beforeinstallprompt recibido — la app es instalable');
+  render();
+});
+
+document.getElementById('inst').addEventListener('click', function(){
+  if(prompt) prompt.prompt();
+});
+
+setTimeout(function(){
+  if(!prompt){
+    notes.unshift('Chrome no ha ofrecido instalación en 8 segundos. Con los puntos en rojo de arriba ya sabemos por qué; si está todo en verde, desinstala la app y borra los datos del sitio en Chrome.');
+    render();
+  }
+}, 8000);
+
+function render(){
+  var v = document.getElementById('verdict');
+  if(!notes.length){ v.innerHTML = '<b>Todo correcto.</b> Chrome debería ofrecer «Instalar aplicación».'; return; }
+  v.innerHTML = '<b>Problemas detectados</b><br>• ' + notes.join('<br>• ');
+}
+</script>
+</body>
+</html>
