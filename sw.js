@@ -1,7 +1,7 @@
 /* Service Worker — App Reposiciones Quirófano Medartis
    IMPORTANTE: cambiar CACHE_VERSION en cada actualización de la app
    para que los móviles (Android/iOS) descarguen la versión nueva. */
-const CACHE_VERSION = 'medartis-app-v13-2026-08-06';
+const CACHE_VERSION = 'medartis-app-v14-2026-09-07';
 
 const CORE = [
   './',
